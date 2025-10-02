@@ -6,7 +6,7 @@ import subprocess
 import sys
 import os
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from netfilterqueue import NetfilterQueue
 from scapy.all import IP, TCP
@@ -43,7 +43,7 @@ class MTDState:
     def __init__(self):
         self.services = {}
         self.mutation_history = []
-        self.last_mutation = datetime.utcnow()
+        self.last_mutation = datetime.now(timezone.utc)
         self.lock = threading.RLock()
 
     def initialize_services(self):
@@ -156,7 +156,7 @@ def mutate_service_port(service_id: str, reason: str = "event"):
         old_port = svc["current_port"]
         svc["current_port"] = new_port
         svc["mutation_count"] += 1
-        mtd_state.last_mutation = datetime.utcnow()
+        mtd_state.last_mutation = datetime.now(timezone.utc)
         event = {
             "id": str(uuid.uuid4()),
             "service_id": service_id,
@@ -199,7 +199,7 @@ def nfq_packet_callback(nf_pkt):
     # SYN and not ACK = new connection attempt
     if (tcp.flags & 0x02) and not (tcp.flags & 0x10):
         src = ip.src
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         lst = conn_events.setdefault(src, [])
         lst.append(now)
         cutoff = now - timedelta(seconds=DETECTION["sliding_window_seconds"])
