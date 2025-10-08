@@ -68,6 +68,12 @@ class MTDState:
 mtd_state = MTDState()
 mtd_state.initialize_services()
 
+print("\n=== Current Service Port Mapping ===")
+for svc in mtd_state.services.values():
+	print(f"{svc['name']:<15} | Type: {svc['type']:<10} | Port: {svc['current_port']}")
+print ("====================================\n")
+
+
 # Track per-source SYN events
 conn_events = {}
 recent_triggers = {}
@@ -199,23 +205,36 @@ def nfq_packet_callback(nf_pkt):
     # SYN and not ACK = new connection attempt
     if (tcp.flags & 0x02) and not (tcp.flags & 0x10):
         src = ip.src
+        dst_port= int(tcp.dport)
         now = datetime.now(timezone.utc)
+        #record this event for sliding-window detection
         lst = conn_events.setdefault(src, [])
         lst.append(now)
+        #drop old events outside the sliding window
         cutoff = now - timedelta(seconds=DETECTION["sliding_window_seconds"])
         while lst and lst[0] < cutoff:
             lst.pop(0)
 
+	#if threshold is reached, check cooldown then trigger mutation
         if len(lst) >= DETECTION["conn_threshold"]:
             last_trig = recent_triggers.get(src)
             if not last_trig or now - last_trig > TRIGGER_COOLDOWN:
                 # Trigger mutation
                 with mtd_state.lock:
-                    active_services = list(mtd_state.services.keys())
-                if active_services:
-                    sid = random.choice(active_services)
-                    mutate_service_port(sid, reason=f"scan_from_{src}")
+                    target_sid= None
+                for sid, svc in mtd_state.services.items():
+                    if svc.get('current_port') == dst_port:
+                       target_sid= sid
+                       break
+                if target_sid:
+                    mutate_service_port(target_sid, reason=f"scan_from_{src}_to_port_{dst_port}")
                     recent_triggers[src] = now
+                else:
+                    #I'm not sure this is a good idea, but it calls a random mutation if no service matched the scanned port
+                    if mtd_state.services:
+                       sid = random.choice(list(mtd_state.services.keys()))
+                       mutate_service_port(sid, reason=f"scan_from_{src}_to_unknown_port_{dst_port}")
+                       recent_triggers[src] = now
 
     nf_pkt.accept()
 
