@@ -14,22 +14,22 @@ from scapy.all import IP, TCP
 # ---------- CONFIG ----------
 MTD_CONFIG = {
     "port_ranges": {
-        "web": [8080, 8090, 8100, 8110, 8120],
+        "web": [80, 8080, 8090, 8100, 8110, 8120],
         "database": [5400, 5401, 5402, 5403, 5404],
         "api": [3000, 3001, 3002, 3003, 3004],
-        "ssh": [2200, 2201, 2202, 2203, 2204],
-        "ftp": [2100, 2101, 2102, 2103, 2104]
+        "ssh": [22, 2200, 2201, 2202, 2203, 2204],
+        "ftp": [21, 2100, 2101, 2102, 2103, 2104]
     }
 }
 
 DETECTION = {
-    "sliding_window_seconds": 10,
-    "conn_threshold": 8,
+    "sliding_window_seconds": 10, # time window used to observe connection attempts from each source.
+    "conn_threshold": 8, #after 8 connection attempts, (in sliding_window_seconds) we consider it suspicious
     "queue_num": 1,
     "dry_run": False   # set True for safe testing (no iptables changes)
 }
 
-TRIGGER_COOLDOWN = timedelta(seconds=30)  # Prevents frequent mutations for same attacker.
+TRIGGER_COOLDOWN = timedelta(seconds=30)  # Prevents frequent mutations for same attacker: prevents the system from mutating too frequently
 
 # Track iptables rules we add
 iptables_rules_added = []
@@ -57,11 +57,12 @@ class MTDState:
         for svc in services:
             sid = str(uuid.uuid4())
             ports = MTD_CONFIG["port_ranges"][svc["type"]]
+            default_port = ports [0]
             self.services[sid] = {
                 "id": sid,
                 "name": svc["name"],
                 "type": svc["type"],
-                "current_port": random.choice(ports),
+                "current_port": default_port,
                 "mutation_count": 0
             }
 
@@ -182,6 +183,22 @@ def mutate_service_port(service_id: str, reason: str = "event"):
 
         return True
 
+def close_port(port: int):
+    """
+    close a scanned port by adding a DROP rule in iptables
+    It should be called only when a port with no service is scanned
+    """
+    if DETECTION["dry_run"]:
+        print(f"[IPTABLES] Dry-run: would close port {port}")
+        return True
+    cmd = [IPTABLES_CMD, "-A", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
+    ok = run_cmd(cmd)
+    if ok:
+        print(f"[IPTABLES] Closed unused/scanned port {port}")
+    else:
+        print(f"[IPTABLES] Failed to close port {port}")
+    return ok
+
 # ---------- NFQUEUE CALLBACK ----------
 def nfq_packet_callback(nf_pkt):
     """
@@ -228,13 +245,11 @@ def nfq_packet_callback(nf_pkt):
                        break
                 if target_sid:
                     mutate_service_port(target_sid, reason=f"scan_from_{src}_to_port_{dst_port}")
-                    recent_triggers[src] = now
                 else:
                     #I'm not sure this is a good idea, but it calls a random mutation if no service matched the scanned port
-                    if mtd_state.services:
-                       sid = random.choice(list(mtd_state.services.keys()))
-                       mutate_service_port(sid, reason=f"scan_from_{src}_to_unknown_port_{dst_port}")
-                       recent_triggers[src] = now
+                    close_port(dst_port)
+                    print(f"[SECURITY] Scan detected from {src} on unused port {dst_port} - port closed")
+                recent_triggers[src] = now
 
     nf_pkt.accept()
 
