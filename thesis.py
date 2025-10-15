@@ -183,7 +183,7 @@ def mutate_service_port(service_id: str, reason: str = "event"):
 
         return True
 
-def close_port(port: int)
+def close_port(port: int):
 """
 close a scanned port by adding a DROP rule in iptables
 It should be called only when a port with no service is scanned
