@@ -64,6 +64,7 @@ class MTDState:
                 "type": svc["type"],
                 "current_port": default_port,
                 "mutation_count": 0
+                "last_change": datetime.now(timezone.utc)
             }
 
 mtd_state = MTDState()
@@ -269,6 +270,45 @@ def run_nfq(queue_num=1):
             pass
         cleanup_iptables_chain()
 
+# ---------- TIME-DRIVEN MANAGER ----------
+
+PORT_LIFETIME_SECONDS = 60   # how long (in seconds) a port stays open before automatic rotation
+CHECK_INTERVAL_SECONDS = 5   # how often (in seconds) to check all ports
+
+class PortManager(threading.Thread):
+    """
+    A background thread that periodically checks how long each service port has been open
+    and triggers a mutation if it exceeds PORT_LIFETIME_SECONDS.
+    """
+
+    def __init__(self, state: MTDState):
+        super().__init__(daemon=True)
+        self.state = state
+        self.running = True
+
+    def run(self):
+        print("[MANAGER] Time-driven port manager started")
+        while self.running:
+            now = datetime.now(timezone.utc)
+            with self.state.lock:
+                for sid, svc in self.state.services.items():
+                    # Initialize timestamp if missing
+                    if "last_change" not in svc:
+                        svc["last_change"] = now
+
+                    age = (now - svc["last_change"]).total_seconds()
+                    if age >= PORT_LIFETIME_SECONDS:
+                        print(f"[MANAGER] Rotating {svc['name']} (port {svc['current_port']}) due to timeout")
+                        if mutate_service_port(sid, reason="time_rotation"):
+                            svc["last_change"] = datetime.now(timezone.utc)
+            threading.Event().wait(CHECK_INTERVAL_SECONDS)
+
+    def stop(self):
+        """Signal the thread to stop gracefully."""
+        self.running = False
+
+
+
 # ---------- MAIN ----------
 if __name__ == "__main__":
     if not DETECTION["dry_run"] and not (os.geteuid() == 0):
@@ -276,4 +316,16 @@ if __name__ == "__main__":
         sys.exit(1)
 
     setup_iptables_chain()
-    run_nfq(DETECTION["queue_num"])
+
+     # Start the time-driven manager
+    port_manager = PortManager(mtd_state)
+    port_manager.start()
+     try:
+        run_nfq(DETECTION["queue_num"])
+    except KeyboardInterrupt:
+        print("[STOP] Interrupted by user")
+    finally:
+        # Stop the time-driven manager cleanly
+        port_manager.stop()
+        cleanup_iptables_chain()
+
