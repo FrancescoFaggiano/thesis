@@ -63,7 +63,7 @@ class MTDState:
                 "name": svc["name"],
                 "type": svc["type"],
                 "current_port": default_port,
-                "mutation_count": 0
+                "mutation_count": 0,
                 "last_change": datetime.now(timezone.utc)
             }
 
@@ -320,7 +320,7 @@ if __name__ == "__main__":
      # Start the time-driven manager
     port_manager = PortManager(mtd_state)
     port_manager.start()
-     try:
+    try:
         run_nfq(DETECTION["queue_num"])
     except KeyboardInterrupt:
         print("[STOP] Interrupted by user")
