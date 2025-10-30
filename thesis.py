@@ -45,7 +45,7 @@ DETECTION = {
     "sliding_window_seconds": 10,  # observation window
     "conn_threshold": 8,           # triggers if >= 8 SYNs in sliding window
     "queue_num": 1,
-    "dry_run": True   # Default: True. Set False to enable iptables/Docker changes.
+    "dry_run": False   # Default: True. Set False to enable iptables/Docker changes.
 }
 
 TRIGGER_COOLDOWN = timedelta(seconds=30)  # avoid flapping on same attacker
