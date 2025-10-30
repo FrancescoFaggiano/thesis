@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MTD with Docker-simulated services.
+MTD with Docker-simulated services + CSV logging of mutation events and container IDs.
 
 - Docker containers simulate the real services (web, db, api, ssh, ftp).
 - Containers persist while the service is assigned to a port; when the service
@@ -8,6 +8,7 @@ MTD with Docker-simulated services.
   new container is started on the new port.
 - If an external scan targets a port that does NOT match any service, we only
   close the port (iptables DROP) and do NOT spawn a container.
+- All mutation events are appended to a CSV file for experiment analysis.
 """
 
 import random
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import os
 import shutil
+import csv
 from datetime import datetime, timedelta, timezone
 
 # docker SDK might be optional during dry-run
@@ -43,7 +45,7 @@ DETECTION = {
     "sliding_window_seconds": 10,  # observation window
     "conn_threshold": 8,           # triggers if >= 8 SYNs in sliding window
     "queue_num": 1,
-    "dry_run": False   # Default: True. Set False to enable iptables/Docker changes.
+    "dry_run": True   # Default: True. Set False to enable iptables/Docker changes.
 }
 
 TRIGGER_COOLDOWN = timedelta(seconds=30)  # avoid flapping on same attacker
@@ -54,6 +56,41 @@ nfqueue_rule_added = False
 
 # Locate iptables binary
 IPTABLES_CMD = shutil.which("iptables") or "/sbin/iptables"
+
+# ---------- LOGGING (CSV) ----------
+LOG_DIR = "logs"
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+MUTATION_LOG_FILE = os.path.join(LOG_DIR, f"mtd_mutation_log_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv")
+
+# create header if file missing
+if not os.path.exists(MUTATION_LOG_FILE):
+    with open(MUTATION_LOG_FILE, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "timestamp",
+            "service_id",
+            "service_name",
+            "old_port",
+            "new_port",
+            "reason",
+            "container_id"   # NEW container id after mutation (if available)
+        ])
+
+def log_mutation(timestamp: datetime, service_id: str, service_name: str, old_port, new_port, reason: str, container_id: str):
+    """Append a mutation event to the CSV log."""
+    with open(MUTATION_LOG_FILE, "a", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            timestamp.astimezone(timezone.utc).isoformat(),
+            service_id,
+            service_name,
+            old_port if old_port is not None else "",
+            new_port if new_port is not None else "",
+            reason,
+            container_id or ""
+        ])
 
 # ---------- STATE ----------
 class MTDState:
@@ -131,7 +168,6 @@ class DockerManager:
             print("[DOCKER] Docker client unavailable; cannot spawn simulated service")
             return None
 
-        # Create a small inline script per type
         container_port = host_port
         if service_type in ("web", "api"):
             if service_type == "web":
@@ -249,7 +285,9 @@ class DockerManager:
     def spawn_all_initial_services(self):
         """Spawn containers for every service in mtd_state (called at startup)."""
         for sid, svc in mtd_state.services.items():
-            self.spawn_service_container(sid, svc["type"], svc["current_port"])
+            cid = self.spawn_service_container(sid, svc["type"], svc["current_port"])
+            # Log initial spawn as an "initial_spawn" mutation event with container_id (if available)
+            log_mutation(datetime.now(timezone.utc), sid, svc["name"], "", svc["current_port"], "initial_spawn", cid if cid else "")
 
     def stop_all(self):
         """Stop and remove all service containers managed by this manager."""
@@ -340,6 +378,7 @@ def mutate_service_port(service_id: str, reason: str = "event"):
       - update in-memory state
       - spawn container on new_port and stop old container via docker_manager.move_service()
       - add iptables redirect old->new (optional; helpful so existing clients hitting old port still reach new)
+      - log the event to CSV along with the new container ID (if available)
     """
     with mtd_state.lock:
         if service_id not in mtd_state.services:
@@ -369,11 +408,23 @@ def mutate_service_port(service_id: str, reason: str = "event"):
 
     # spawn container on new port and stop previous container
     moved = docker_manager.move_service(service_id, new_port)
+    # Attempt to fetch the new container_id (if any)
+    container_id = ""
+    if not DETECTION["dry_run"]:
+        with docker_manager.lock:
+            info = docker_manager.service_containers.get(service_id)
+            if info:
+                container_id = info.get("container_id", "")
+
     if not moved and not DETECTION["dry_run"]:
         print(f"[DOCKER] Warning: failed to move container for service {service_id} to {new_port}")
 
     # add iptables redirect old -> new to maintain reachability for clients hitting the old port
     added = add_redirect_rule(old_port, new_port)
+
+    # Log the mutation with container ID
+    log_mutation(mtd_state.last_mutation, service_id, svc["name"], old_port, new_port, reason, container_id)
+
     return True
 
 def close_port(port: int):
@@ -501,7 +552,7 @@ if __name__ == "__main__":
     # Setup iptables/NFQUEUE (or skip in dry-run)
     setup_iptables_chain()
 
-    # Spawn one simulated container per service (unless dry-run)
+    # Spawn one simulated container per service (unless dry-run) and log initial spawns
     docker_manager.spawn_all_initial_services()
 
     # Start manager thread
@@ -522,4 +573,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[DOCKER] Error during shutdown: {e}")
         cleanup_iptables_chain()
-        print("[EXIT] Shutdown complete")
+        print(f"[EXIT] Shutdown complete. Mutation log saved to: {MUTATION_LOG_FILE}")
