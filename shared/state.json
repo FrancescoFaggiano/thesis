@@ -1,0 +1,28 @@
+{
+  "services": [
+    {
+      "id": "svc-web",
+      "name": "Web Server",
+      "type": "web",
+      "current_port": 8080
+    },
+    {
+      "id": "svc-api",
+      "name": "API Gateway",
+      "type": "api",
+      "current_port": 3000
+    },
+    {
+      "id": "svc-db",
+      "name": "Database",
+      "type": "database",
+      "current_port": 5400
+    },
+    {
+      "id": "svc-ssh",
+      "name": "SSH Service",
+      "type": "ssh",
+      "current_port": 2200
+    }
+  ]
+}

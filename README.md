@@ -1,114 +1,200 @@
-# Thesis Project — Dynamic Port Mutation for Network Defense
+# Moving Target Defense (MTD) Port Mutation System
 
 ## Overview
-This project implements a **Moving Target Defense (MTD)** mechanism that changes the network ports of critical services to reduce exposure to port scanning and intrusion attempts.
 
-The system continuously monitors network traffic to detect suspicious behavior and automatically mutates service ports in real time. This approach aims to increase network unpredictability and resilience against reconnaissance and exploitation.
+This project implements a **Moving Target Defense (MTD)** system that dynamically rotates the network ports of decoy services to disrupt attacker reconnaissance while maintaining uninterrupted service for legitimate users.
 
-The implementation integrates Python with the Linux networking stack through **iptables** and **NetfilterQueue**, enabling live interception and redirection of packets.
+It achieves this through:
 
----
-
-## 1. System Concept
-Traditional systems expose services on static ports (for example, SSH on 22, HTTP on 80). This predictability allows attackers to easily locate and target services through automated scans.
-
-This project introduces a dynamic defense mechanism that:
-1. Monitors incoming TCP connection attempts.
-2. Detects scanning behavior based on connection frequency and timing.
-3. Triggers automatic port mutation for the targeted service.
-4. Updates firewall rules to maintain legitimate access.
-5. Periodically rotates service ports, even in the absence of attacks.
+- Real packet-level monitoring using **Scapy + NetfilterQueue**
+- **iptables REDIRECT** rules to preserve legitimate traffic
+- Dynamic decoy service deployment using **Docker**
+- Shared state coordination between MTD components
+- Detailed logging for experimental analysis
+- **Prometheus** metrics and **Grafana** dashboards
 
 ---
 
-## 2. Architecture Overview
+## Architecture Overview
 
-### 2.1 Detection Engine
-- Uses a **sliding time window** to observe TCP SYN packets from each source IP.
-- Identifies potential scanning when the number of connection attempts exceeds a defined threshold.
-- Parameters:
-  - `sliding_window_seconds`: duration of observation per IP.
-  - `conn_threshold`: number of attempts considered suspicious.
-  - `queue_num`: NetfilterQueue queue number for packet interception.
-  - `dry_run`: enables safe testing without modifying iptables.
+The system uses a hybrid architecture:
 
-### 2.2 Mutation Engine
-- Each service (e.g., web, API, database, SSH, FTP) has a range of possible ports.
-- Upon detection of a scan or timeout event:
-  - A new port is randomly selected from the allowed range.
-  - Internal state is updated.
-  - Firewall rules are modified to redirect connections from the old to the new port.
-- All mutation events are logged in memory, recording timestamp, affected service, and reason.
+- **mtd-detector** runs with host networking and elevated privileges  
+- All other components (mutator, controller, services) run inside Docker  
+- A shared directory coordinates state, logs, and triggers  
+- Prometheus scrapes all metrics  
+- Grafana visualizes trends and anomalies
 
-### 2.3 Time-Driven Manager
-- A background thread (`PortManager`) monitors how long each service port has been active.
-- If a port exceeds its configured lifetime, it is rotated automatically.
-- Default values:
-  - `PORT_LIFETIME_SECONDS = 60`
-  - `CHECK_INTERVAL_SECONDS = 5`
+```
+                    Clients / Attackers
+                           │
+                           ▼
+                 ┌──────────────────────┐
+                 │ Kali Linux Host VM  │
+                 │  (iptables layer)   │
+                 └───────┬─────────────┘
+                         │ NFQUEUE
+                         ▼
+        ┌─────────────────────────────────────────┐
+        │         mtd-detector (Docker)           │
+        │  • Scapy + NetfilterQueue packet capture│
+        │  • Detects scans                        │
+        │  • Logs all connections                 │
+        │  • Adds iptables REDIRECT & DROP rules  │
+        │  • Generates triggers for the mutator   │
+        │  • Exposes Prometheus metrics           │
+        └─────────────────┬───────────────────────┘
+                          │ Shared Volume
+                          ▼
+          ┌────────────────────────────────────┐
+          │               Docker                │
+          │   ┌──────────────┐   ┌────────────┐│
+          │   │ mtd-mutator  │   │ controller ││
+          │   │ - selects    │   │ - launches ││
+          │   │   new ports  │   │   decoys   ││
+          │   └──────────────┘   └────────────┘│
+          │            │   updates state         │
+          │            ▼                          │
+          │     shared/state.json                 │
+          │                                        │
+          │   ┌──────────────┐    ┌───────────┐   │
+          │   │ decoy svc #1 │    │ svc #N    │   │
+          │   └──────────────┘    └───────────┘   │
+          │                                        │
+          │      Prometheus <──── metrics ───►     │
+          │      Grafana     ◄── dashboards ───    │
+          └────────────────────────────────────────┘
+```
 
-### 2.4 Firewall Integration
-- A custom chain (`MTD_REDIRECT`) is created within the `nat` table.
-- The script adds and removes rules in:
-  - `PREROUTING` (to redirect traffic to new ports).
-  - `INPUT` (to link NetfilterQueue for packet inspection).
-- On shutdown, all modifications are cleaned up automatically.
+## Execution Instructions
+
+Start the entire system:
+
+```bash
+sudo docker compose up --build
+```
+
+URLs:
+
+|    Component    | URL |
+|-----------------|-----|
+| Prometheus      | http://localhost:9090 |
+| Grafana         | http://localhost:3000 |
+| Decoy Services  | Port defined in state.json |
 
 ---
 
-## 3. Code Structure
+## Testing Scanning Behavior
 
-| Component | Description |
-|------------|--------------|
-| `MTD_CONFIG` | Defines the allowed port ranges for each service type. |
-| `DETECTION` | Defines detection thresholds and NFQUEUE configuration. |
-| `MTDState` | Tracks service information, mutation history, and synchronization. |
-| `mutate_service_port()` | Performs service port mutation and updates firewall rules. |
-| `nfq_packet_callback()` | Packet handler that detects scanning behavior and triggers mutations. |
-| `PortManager` | Background thread for time-based mutations. |
-| `setup_iptables_chain()` / `cleanup_iptables_chain()` | Handle creation and removal of iptables rules and chains. |
+Perform an nmap scan:
+
+```bash
+sudo nmap -p 1-10000 localhost
+```
+
+Expected results:
+
+1. Detector logs SYN packets  
+2. Scan detection triggers mutation  
+3. Mutator updates `state.json`  
+4. Controller rotates the service container  
+5. Detector installs `iptables REDIRECT`  
+6. Metrics update in Prometheus  
+7. Dashboards update in Grafana  
 
 ---
 
-## 4. Execution Instructions
+## Legitimate Traffic Behavior
 
-### Requirements
-- **Operating System:** Linux with iptables and Netfilter support.
-- **Privileges:** Root (required for NFQUEUE and iptables).
-- **Python:** Version 3.8 or higher.
-- **Dependencies:**
-  - `scapy`
-  - `netfilterqueue`
+Even after a port mutation (e.g., 8080 → 5401), detector installs:
 
-### Running in Safe (Dry-Run) Mode
-This mode simulates the behavior without modifying iptables:
-```python
-DETECTION["dry_run"] = True
-python3 thesis.py
+```
+iptables -t nat -A MTD_REDIRECT   -p tcp --dport 8080   -j REDIRECT --to-ports 5401
 ```
 
-## 5. Example Behavior
+This ensures:
 
-### Initialization
-On startup, the script initializes default ports:
-```
-Web Server      | Type: web       | Port: 80
-Database        | Type: database  | Port: 5400
-API Gateway     | Type: api       | Port: 3000
-SSH Service     | Type: ssh       | Port: 22
-FTP Server      | Type: ftp       | Port: 21
-```
+- Legitimate users connecting to old ports still reach the service  
+- Zero downtime  
+- Transparent redirection  
+- Attackers receive inconsistent data
 
-### Detection-Based Mutation
-When repeated connection attempts from the same IP are detected:
-```
-[MUTATION] Web Server 80 -> 8090 (reason=scan_from_192.168.1.10_to_port_80)
-```
+Test continuity:
 
-### Time-Based Rotation
-Even in the absence of an attack, ports are periodically changed:
-```
-[MANAGER] Rotating SSH Service (port 22) due to timeout
+```bash
+while true; do
+    curl -s http://localhost:8080 | grep Web
+    sleep 1
+done
 ```
 
 ---
+
+## How iptables REDIRECT Works
+
+Detector compares old/new ports and installs:
+
+```
+iptables -t nat -A MTD_REDIRECT     -p tcp --dport <old_port>     -j REDIRECT --to-ports <new_port>
+```
+
+This preserves connections while disrupting attacker reconnaissance.
+
+---
+
+## Logging Structure
+
+All logs appear under:
+
+```
+shared/logs/
+```
+
+### `traffic.log`
+Contains:
+- All TCP SYN packets
+- Scan detections
+- REDIRECT/DROP rules installed
+
+### `mutations.log`
+Tracks:
+- Every port mutation
+- Reason (time-based vs scan-triggered)
+
+### `mutations_controller.csv`
+Tracks:
+- Container restarts
+- Observed port changes
+
+---
+
+## Grafana Dashboards
+
+Grafana visualizes:
+
+- Mutation timeline  
+- Scan detection rates  
+- Redirect rules  
+- Legitimate traffic continuity  
+- Service hit frequency  
+- Suspicious IP activity  
+
+This satisfies the requirement:
+
+> “Prometheus aggregates metrics; Grafana identifies patterns, trends, anomalies.”
+
+---
+
+## Conclusion
+
+This system provides:
+
+- Real packet-level detection  
+- Dynamic port mutation  
+- Connectivity-preserving MTD using iptables  
+- Modular Docker-managed components  
+- Complete experiment logging  
+- Prometheus-based monitoring  
+- Grafana visualization  
+
+It is fully suitable for academic experimentation and thesis research.
