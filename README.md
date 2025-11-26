@@ -86,11 +86,24 @@ URLs:
 
 ## Testing Scanning Behavior
 
-Perform an nmap scan:
-
+To trigger port mutation:
 ```bash
-sudo nmap -p 1-10000 localhost
+sudo hping3 <TARGET_IP> -p <PORT> -S -c 10
 ```
+This sends 10 SYN packets rapidly to a single port,
+which is sufficient to exceed the detection threshold 
+(default: 8 SYNs in 10 seconds).
+
+To use Nmap effectively, a script or loop is required:
+```bash
+for i in {1..10}; do
+  nmap -p <PORT> <TARGET_IP> &
+done
+```
+A single nmap command does not typically trigger the detector because:
+1) it rate-limits packets internally
+2) it spreads probes across ports
+3) timing is randomized
 
 Expected results:
 
