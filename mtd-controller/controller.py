@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-MTD Controller (containerized)
-- Reads shared/state.json to learn which services exist and their current ports.
-- Spawns service containers (from the simple_service image) bound to the requested host port.
-- Exposes Prometheus metrics on METRICS_PORT (default 9100).
-- Logs mutations to shared/logs/mutations.csv
+mtd-controller:
+- Reads shared/state.json
+- Ensures one container per service, mapped to current_port
+- Uses SERVICE_IMAGE env (built from services/simple_service)
+- Exposes Prometheus metrics on METRICS_PORT
+- Logs mutations detected via state changes (for correlation)
 """
 
 import os
 import time
 import json
-import uuid
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,102 +22,105 @@ SHARED_DIR = Path("/app/shared")
 STATE_FILE = SHARED_DIR / "state.json"
 LOG_DIR = SHARED_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-MUTATION_LOG = LOG_DIR / "mutations.csv"
+MUTATION_LOG = LOG_DIR / "mutations_controller.csv"
 
 METRICS_PORT = int(os.environ.get("METRICS_PORT", "9100"))
+SERVICE_IMAGE = os.environ.get("SERVICE_IMAGE", "mtd_simple_service:latest")
 
-# Prometheus metrics
-mutation_counter = Counter("mtd_controller_mutations_total", "Total mutations", ["service_name", "reason"])
-service_port_gauge = Gauge("mtd_controller_service_port", "Current port per service", ["service_name"])
-active_containers_gauge = Gauge("mtd_controller_active_containers", "Number of active service containers")
+mutation_counter = Counter(
+    "mtd_controller_mutations_total",
+    "Mutations observed by controller via state.json changes",
+    ["service_name"]
+)
 
-# Docker client (uses mounted docker socket)
+service_port_gauge = Gauge(
+    "mtd_controller_service_port",
+    "Current port for each service (view from controller)",
+    ["service_name"]
+)
+
+active_containers_gauge = Gauge(
+    "mtd_controller_active_containers",
+    "Number of active decoy containers"
+)
+
 client = docker.from_env()
-
-# Keep mapping service_id -> container info
-containers = {}
+containers = {}  # service_id -> {container, port, name}
 lock = threading.RLock()
 
-# utility
 def read_state():
     with open(STATE_FILE, "r") as f:
         return json.load(f)
 
-def write_mutation_log(ts, service_id, service_name, old_port, new_port, reason, container_id):
+def write_mutation_log(ts, service_id, name, old_port, new_port, reason):
     header_needed = not MUTATION_LOG.exists()
     with open(MUTATION_LOG, "a") as f:
         if header_needed:
-            f.write("timestamp,service_id,service_name,old_port,new_port,reason,container_id\n")
-        f.write(f"{ts},{service_id},{service_name},{old_port},{new_port},{reason},{container_id}\n")
+            f.write("timestamp,service_id,service_name,old_port,new_port,reason\n")
+        f.write(f"{ts},{service_id},{name},{old_port},{new_port},{reason}\n")
 
 def ensure_service_container(svc):
-    """Ensure a Docker container is running for svc at host port svc['current_port']."""
     sid = svc["id"]
+    name = svc["name"]
     desired_port = int(svc["current_port"])
-    name = f"mtd_service_{sid}"
+    cname = f"mtd_svc_{sid}"
 
     with lock:
         info = containers.get(sid)
+        if info and info.get("port") == desired_port:
+            return info["container"].id
+
+        # If exists with wrong port, remove
         if info:
-            # check port matches; if not, remove and recreate
-            if info.get("port") == desired_port:
-                return info["container"].id
-            # else restart on desired port
             try:
                 info["container"].stop(timeout=1)
                 info["container"].remove()
             except Exception:
                 pass
             containers.pop(sid, None)
+# Force cleanup of any stale Docker container with same name
+        try:
+            stale = client.containers.get(cname)
+            stale.stop(timeout=1)
+            stale.remove()
+            print(f"[CONTROLLER] Removed stale container {cname}")
+        except docker.errors.NotFound:
+            pass
+        except Exception as e:
+            print(f"[CONTROLLER] Cleanup error for {cname}: {e}")
 
-        # run container mapping container port 8000 -> host desired_port
+        # Start new container mapping 8000->desired_port
         try:
             cont = client.containers.run(
-                "mtd_simple_service:latest",
+                SERVICE_IMAGE,
                 detach=True,
-                name=name,
+                name=cname,
                 ports={"8000/tcp": desired_port},
                 auto_remove=False
             )
             containers[sid] = {"container": cont, "port": desired_port, "name": name}
             active_containers_gauge.set(len(containers))
-            service_port_gauge.labels(service_name=svc["name"]).set(desired_port)
+            service_port_gauge.labels(service_name=name).set(desired_port)
+            print(f"[CONTROLLER] Started {name} on host port {desired_port} (container {cont.id[:12]})")
             return cont.id
         except Exception as e:
-            print(f"[CONTROLLER] Failed to start container for {sid} on port {desired_port}: {e}")
+            print(f"[CONTROLLER] Failed to start {name} on port {desired_port}: {e}")
             return ""
 
-def reconcile():
-    """Main reconcile loop: read state.json and ensure containers match the state."""
+def reconcile_loop():
     while True:
         try:
             state = read_state()
             services = state.get("services", [])
             for svc in services:
-                sid = svc["id"]
-                # ensure container is running at svc['current_port']
-                old_port = None
-                with lock:
-                    prev = containers.get(sid)
-                    if prev:
-                        old_port = prev.get("port")
-                cid = ensure_service_container(svc)
-                if cid:
-                    # if port changed, record mutation
-                    with lock:
-                        prev = containers.get(sid)
-                        if prev and prev.get("port") != svc["current_port"]:
-                            pass  # handled above
-                # publish gauge
-                service_port_gauge.labels(service_name=svc["name"]).set(int(svc["current_port"]))
+                ensure_service_container(svc)
         except FileNotFoundError:
-            print("[CONTROLLER] state.json not found; will retry")
+            print("[CONTROLLER] state.json not found yet")
         except Exception as e:
             print(f"[CONTROLLER] reconcile error: {e}")
         time.sleep(5)
 
-def watch_state_file():
-    """Watch state file modification and record when ports change (log + metrics)."""
+def watch_state_mutations():
     mtime = STATE_FILE.stat().st_mtime if STATE_FILE.exists() else 0
     prev_ports = {}
     while True:
@@ -136,37 +139,29 @@ def watch_state_file():
                             prev_ports[sid] = port
                         elif prev != port:
                             ts = datetime.now(timezone.utc).isoformat()
-                            # update prev_ports
                             prev_ports[sid] = port
-                            # mutation metric + log
-                            mutation_counter.labels(service_name=name, reason="external_state_change").inc()
-                            write_mutation_log(ts, sid, name, prev, port, "external_state_change", "")
-                            print(f"[CONTROLLER] Detected port change {name}: {prev} -> {port}")
+                            mutation_counter.labels(service_name=name).inc()
+                            write_mutation_log(ts, sid, name, prev, port, "state_change")
+                            print(f"[CONTROLLER] Observed mutation {name}: {prev} -> {port}")
                             service_port_gauge.labels(service_name=name).set(port)
-            else:
-                # no state file; wait
-                pass
         except Exception as e:
-            print(f"[CONTROLLER] watch_state_file error: {e}")
+            print(f"[CONTROLLER] mutation watcher error: {e}")
         time.sleep(1)
 
 if __name__ == "__main__":
-    # start metrics
-    print(f"[CONTROLLER] Starting Prometheus metrics on :{METRICS_PORT}")
+    print(f"[CONTROLLER] Starting metrics on :{METRICS_PORT}")
     start_http_server(METRICS_PORT)
 
-    # initial reconcile on startup
-    t_reconcile = threading.Thread(target=reconcile, daemon=True)
-    t_watch = threading.Thread(target=watch_state_file, daemon=True)
-    t_reconcile.start()
-    t_watch.start()
+    t1 = threading.Thread(target=reconcile_loop, daemon=True)
+    t2 = threading.Thread(target=watch_state_mutations, daemon=True)
+    t1.start()
+    t2.start()
 
-    # main loop keeps container alive
     try:
         while True:
             time.sleep(10)
     except KeyboardInterrupt:
-        print("[CONTROLLER] Shutting down, stopping managed containers")
+        print("[CONTROLLER] Shutting down")
         with lock:
             for sid, info in list(containers.items()):
                 try:
