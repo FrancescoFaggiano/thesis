@@ -34,7 +34,8 @@ services:
   controller:
     build: ./mtd-controller
     container_name: mtd-controller
-    network_mode: "host"
+    ports:
+      - "9100:9100"
     volumes:
       - ./shared:/app/shared
       - /var/run/docker.sock:/var/run/docker.sock
