@@ -115,25 +115,26 @@ def find_service_by_port(port: int):
 def setup_iptables():
     # Create MTD_REDIRECT chain in nat table
     subprocess.run([IPTABLES_CMD, "-t", "nat", "-N", "MTD_REDIRECT"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     # Ensure PREROUTING jumps into MTD_REDIRECT
     subprocess.run([IPTABLES_CMD, "-t", "nat", "-C", "PREROUTING",
                     "-j", "MTD_REDIRECT"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # If check failed, insert it
     subprocess.run([IPTABLES_CMD, "-t", "nat", "-I", "PREROUTING", "1",
                     "-j", "MTD_REDIRECT"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # NFQUEUE rule on INPUT for NEW TCP
-    subprocess.run([
-        IPTABLES_CMD,
-        "-I", "INPUT", "-p", "tcp",
-        "-m", "conntrack", "--ctstate", "NEW",
-        "-j", "NFQUEUE", "--queue-num", str(QUEUE_NUM)
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # NFQUEUE rule on INPUT + OUTPUT for NEW TCP
+    for chain in ("INPUT", "OUTPUT"):
+        subprocess.run([
+            IPTABLES_CMD,
+            "-I", chain, "-p", "tcp",
+            "-m", "conntrack", "--ctstate", "NEW",
+            "-j", "NFQUEUE", "--queue-num", str(QUEUE_NUM)
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    log_event("iptables MTD_REDIRECT chain + NFQUEUE rule installed")
+    log_event("iptables MTD_REDIRECT chain + NFQUEUE rules (INPUT/OUTPUT) installed")
 
 def add_redirect_rule(old_port: int, new_port: int, service_name: str):
     cmd = [
