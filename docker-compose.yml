@@ -56,10 +56,8 @@ services:
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus_mtd
-    ports:
-      - "9090:9090"
-    networks:
-      - default
+    network_mode:
+      - host
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     restart: unless-stopped
