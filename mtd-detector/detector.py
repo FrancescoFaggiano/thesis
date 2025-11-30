@@ -262,10 +262,8 @@ if __name__ == "__main__":
     t.start()
 
     nfq = NetfilterQueue()
-    print("[DEBUG] About to bind NFQUEUE")
+    
     nfq.bind(QUEUE_NUM, nfq_callback)
-    print("[DEBUG] NFQUEUE bound successfully")
-
     log_event(f"NFQUEUE bound on queue {QUEUE_NUM}, listening for TCP SYNs")
 
     try:
