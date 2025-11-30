@@ -1,5 +1,5 @@
 from flask import Flask, jsonify
-from prometheus_client import generate_latest, CollectorRegistry, CONTENT_TYPE_LATEST, Counter
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter
 import os
 
 app = Flask(__name__)
@@ -14,7 +14,7 @@ def index():
 
 @app.route("/health")
 def health():
-    return jsonify({"status":"ok", "service": SERVICE_NAME})
+    return jsonify({"status": "ok", "service": SERVICE_NAME})
 
 @app.route("/metrics")
 def metrics():

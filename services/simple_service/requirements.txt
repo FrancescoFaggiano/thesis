@@ -1,2 +1,2 @@
-fastapi
-uvicorn
+flask
+prometheus_client
