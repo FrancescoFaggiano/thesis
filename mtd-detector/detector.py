@@ -154,6 +154,7 @@ def drop_port(port: int):
 # ---------------- NFQUEUE CALLBACK ----------------
 
 def nfq_callback(nfpacket):
+    print("[NFQUEUE] packets received")
     try:
         pkt = IP(nfpacket.get_payload())
     except Exception:
