@@ -30,7 +30,7 @@ CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "5"))
 # Allowed port ranges by type (tweak to match your thesis)
 PORT_RANGES = {
     "web": [8080, 8081, 8082, 8083, 8084],
-    "api": [3000, 3001, 3002],
+    "api": [3001, 3002, 3003],
     "database": [5400, 5401, 5402],
     "ssh": [2200, 2201, 2202],
     "ftp": [2100, 2101, 2102]
