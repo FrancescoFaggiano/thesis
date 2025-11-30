@@ -13,4 +13,4 @@ RUN apt-get update && apt-get install -y \
 
 COPY detector.py .
 
-CMD ["python" "-u" "detector.py"]
+CMD ["python", "detector.py"]
