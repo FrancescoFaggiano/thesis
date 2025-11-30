@@ -146,7 +146,13 @@ def add_redirect_rule(old_port: int, new_port: int, service_name: str):
     redirects_total.labels(service_name=service_name).inc()
     log_event(f"REDIRECT old_port={old_port} -> new_port={new_port} for {service_name}")
 
+PROTECTED_PORTS = {22, 80, 3000, 9090, 9100, 9101, 9102}
+
 def drop_port(port: int):
+    if port in PROTECTED_PORTS:
+        log_event(f"SKIPPED drop on protected port {port}")
+        return
+
     cmd = [IPTABLES_CMD, "-A", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     drops_total.labels(dst_port=str(port)).inc()
