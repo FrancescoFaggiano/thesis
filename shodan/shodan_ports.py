@@ -1,8 +1,10 @@
 import shodan
 from collections import Counter
 import json
+import os
 
-API_KEY = "tH0NMqOR9kjB1ezO7xsNqqc9ovGGzru3"
+API_KEY = os.getenv("SHODAN_API_KEY")
+
 api = shodan.Shodan(API_KEY)
 
 ports = Counter()
