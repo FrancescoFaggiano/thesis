@@ -1,6 +1,6 @@
 import json, random, time, os
 
-TARGET = "127.0.0.1"
+TARGET = "10.0.2.2"
 
 # Load behavior profile
 with open("/app/attack_profile.json") as f:
