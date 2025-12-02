@@ -61,6 +61,14 @@ services:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     restart: unless-stopped
 
+  synthetic_attacker:
+    build: shodan/attacker
+    depends_on:
+      - detection
+    network_mode: host
+    volumes:
+      - ./shodan:/data
+
   grafana:
     image: grafana/grafana:latest
     container_name: grafana_mtd
