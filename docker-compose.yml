@@ -1,0 +1,83 @@
+version: "3.9"
+
+services:
+  detector:
+    build: ./mtd-detector
+    container_name: mtd-detector
+    network_mode: "host"
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./shared:/app/shared
+    environment:
+      - METRICS_PORT=9101
+      - QUEUE_NUM=1
+      - SLIDING_WINDOW_SECONDS=10
+      - CONN_THRESHOLD=8
+      - TRIGGER_COOLDOWN_SECONDS=30
+    restart: unless-stopped
+
+  mutator:
+    build: ./mtd-mutator
+    container_name: mtd-mutator
+    network_mode: "host"
+    volumes:
+      - ./shared:/app/shared
+    environment:
+      - METRICS_PORT=9102
+      - PORT_LIFETIME_SECONDS=60
+      - CHECK_INTERVAL=5
+    restart: unless-stopped
+
+  controller:
+    build: ./mtd-controller
+    container_name: mtd-controller
+    ports:
+      - "9100:9100"
+    volumes:
+      - ./shared:/app/shared
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - METRICS_PORT=9100
+      - SERVICE_IMAGE=mtd_simple_service:latest
+    restart: unless-stopped
+
+  # This just ensures the decoy image gets built;
+  # controller will actually create the running instances.
+  simple_service_image:
+    build: ./services/simple_service
+    image: mtd_simple_service:latest
+    container_name: mtd_simple_service_template
+    command: ["sleep", "infinity"]
+    restart: "no"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus_mtd
+    network_mode: "host"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+  synthetic_attacker:
+    build: shodan/attacker
+    depends_on:
+      - detection
+    network_mode: host
+    volumes:
+      - ./shodan:/data
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana_mtd
+    network_mode: "host"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: unless-stopped
