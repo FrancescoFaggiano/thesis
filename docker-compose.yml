@@ -64,7 +64,7 @@ services:
   synthetic_attacker:
     build: shodan/attacker
     depends_on:
-      - detection
+      - detector
     network_mode: host
     volumes:
       - ./shodan:/data

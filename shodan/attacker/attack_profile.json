@@ -1,4 +1,5 @@
 {
+  "target":"10.0.2.2",
   "scan_count": 40,
   "min_delay": 1,
   "max_delay": 3,

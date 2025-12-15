@@ -15,12 +15,12 @@ mode       = profile.get("mode", "default")
 with open("/data/port_distribution.json") as f:
     ports = json.load(f)
 
-# Build weighted pool
-port_pool = []
-for p,w in ports:
-    port_pool.extend([p]*w)
-
-ports_to_scan = random.sample(port_pool, min(scan_count, len(port_pool)))
+# Memory-safe weighted sampling
+ports_to_scan = random.choices(
+    population=[p for p, w in ports],
+    weights=[w for p, w in ports],
+    k=min(scan_count, len(ports)) if scan_count <= 0 else scan_count
+)
 
 print(f"[ATTACKER] Mode={mode} | Targets={len(ports_to_scan)}")
 
