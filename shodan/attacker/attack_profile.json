@@ -1,7 +1,7 @@
 {
   "target":"10.0.2.2",
-  "scan_count": 40,
-  "min_delay": 1,
-  "max_delay": 3,
-  "mode": "normal"
+  "scan_count": 80,
+  "min_delay": 0.05,
+  "max_delay": 0.2,
+  "mode": "aggressive"
 }
