@@ -1,12 +1,11 @@
 import shodan
 import json
 import os
-from collections import Counter
 from dotenv import load_dotenv
 from pathlib import Path
 
 # --------------------------------------------------
-# Load API key from shodan/.env (local, gitignored)
+# Load API key from shodan/.env
 # --------------------------------------------------
 
 env_path = Path(__file__).parent / ".env"
@@ -27,35 +26,35 @@ if not API_KEY:
 api = shodan.Shodan(API_KEY)
 
 # --------------------------------------------------
-# Define queries (focused on common exposed services)
+# Define queries (ports of interest)
 # --------------------------------------------------
 
-queries = [
-    "port:22",    # SSH
-    "port:80",    # HTTP
-    "port:443",   # HTTPS
-    "port:8080",  # Alt HTTP
-    "port:21"     # FTP
+ports = [
+    22,    # SSH
+    80,    # HTTP
+    443,   # HTTPS
+    21,    # FTP
+    8080,  # Alt HTTP
 ]
 
 # --------------------------------------------------
-# Collect port frequencies
+# Query Shodan using COUNT (no host data)
 # --------------------------------------------------
 
-ports_counter = Counter()
+port_distribution = []
 
-for query in queries:
-    print(f"[+] Querying Shodan: {query}")
+for port in ports:
+    query = f"port:{port}"
+    print(f"[+] Counting Shodan results for {query}")
+
     try:
-        results = api.search(query, limit=500)
+        result = api.count(query)
+        total = result.get("total", 0)
     except shodan.APIError as e:
-        print(f"[!] Shodan API error: {e}")
-        continue
+        print(f"[!] Shodan API error for {query}: {e}")
+        total = 0
 
-    for host in results.get("matches", []):
-        port = host.get("port")
-        if port:
-            ports_counter[port] += 1
+    port_distribution.append([port, total])
 
 # --------------------------------------------------
 # Save distribution to JSON
@@ -64,6 +63,6 @@ for query in queries:
 output_path = Path(__file__).parent / "port_distribution.json"
 
 with open(output_path, "w") as f:
-    json.dump(ports_counter.most_common(), f, indent=2)
+    json.dump(port_distribution, f, indent=2)
 
 print(f"[✓] Saved port distribution to {output_path}")
