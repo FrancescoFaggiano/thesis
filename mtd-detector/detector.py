@@ -49,6 +49,9 @@ TRIGGER_COOLDOWN_SECONDS = int(os.environ.get("TRIGGER_COOLDOWN_SECONDS", "30"))
 
 IPTABLES_CMD = shutil.which("iptables") or "/sbin/iptables"
 
+REDIRECT_GRACE_SECONDS = int(os.environ.get("REDIRECT_GRACE_SECONDS", "30"))
+
+
 # ---------------- PROMETHEUS METRICS ----------------
 
 connections_total = Counter(
@@ -86,6 +89,7 @@ conn_events = defaultdict(deque)      # src_ip -> deque[timestamps]
 recent_triggers = {}                  # src_ip -> last_trigger_time
 known_ports = {}                      # service_id -> last_known_port
 
+active_redirects = []
 # ---------------- UTILITIES ----------------
 
 def log_event(msg: str):
@@ -146,7 +150,16 @@ def add_redirect_rule(old_port: int, new_port: int, service_name: str):
     redirects_total.labels(service_name=service_name).inc()
     log_event(f"REDIRECT old_port={old_port} -> new_port={new_port} for {service_name}")
 
-PROTECTED_PORTS = {22, 80, 3000, 9090, 9100, 9101, 9102, 443}
+def remove_redirect_rule(old_port: int, new_port: int, service_name: str):
+    cmd = [
+        IPTABLES_CMD, "-t", "nat", "-D", "MTD_REDIRECT",
+        "-p", "tcp", "--dport", str(old_port),
+        "-j", "REDIRECT", "--to-ports", str(new_port)
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log_event(f"REDIRECT EXPIRED old_port={old_port} -> new_port={new_port} for {service_name}")
+
+PROTECTED_PORTS = {3000, 9090, 9100, 9101, 9102, 443, 50000}
 
 def drop_port(port: int):
     if port in PROTECTED_PORTS:
@@ -226,10 +239,21 @@ def watch_state_for_redirects():
       - install iptables REDIRECT old->new
       - log event + metrics
     """
-    global known_ports
+    global known_ports, active_redirects
     last_mtime = STATE_FILE.stat().st_mtime if STATE_FILE.exists() else 0.0
 
     while True:
+        # Always cleanup expired redirects (once per loop)
+        now = time.time()
+        if active_redirects:
+            still_active = []
+            for r in active_redirects:
+                if now >= r["expires_at"]:
+                    remove_redirect_rule(r["old"], r["new"], r["service"])
+                else:
+                    still_active.append(r)
+            active_redirects[:] = still_active
+
         try:
             if STATE_FILE.exists():
                 mtime = STATE_FILE.stat().st_mtime
@@ -243,10 +267,24 @@ def watch_state_for_redirects():
                         old_port = known_ports.get(sid)
                         if old_port is None:
                             known_ports[sid] = new_port
-                        elif old_port != new_port:
+                            continue
+                        if old_port != new_port:
+                            if REDIRECT_GRACE_SECONDS > 0:
                             # Port changed: add redirect
-                            add_redirect_rule(old_port, new_port, name)
+                                add_redirect_rule(old_port, new_port, name)
+                                active_redirects.append({
+                                    "old": old_port,
+                                    "new": new_port,
+                                    "service": name,
+                                    "expires_at": now + REDIRECT_GRACE_SECONDS
+                                })
+                            else:
+                                log_event(
+                                    f"NO REDIRECT (grace=0) {name}: {old_port} -> {new_port}"
+                                )
+
                             known_ports[sid] = new_port
+
         except Exception as e:
             log_event(f"ERROR in watch_state_for_redirects: {e}")
         time.sleep(1.0)

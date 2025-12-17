@@ -17,6 +17,8 @@ services:
       - SLIDING_WINDOW_SECONDS=10
       - CONN_THRESHOLD=8
       - TRIGGER_COOLDOWN_SECONDS=30
+      - REDIRECT_GRACE_SECONDS=30
+
     restart: unless-stopped
 
   mutator:
