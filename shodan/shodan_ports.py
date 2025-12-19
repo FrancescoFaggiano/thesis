@@ -26,24 +26,48 @@ if not API_KEY:
 api = shodan.Shodan(API_KEY)
 
 # --------------------------------------------------
-# Define queries (ports of interest)
+# Define ports of interest + service labels
 # --------------------------------------------------
 
-ports = [
-    22,    # SSH
-    80,    # HTTP
-    443,   # HTTPS
-    21,    # FTP
-    8080,  # Alt HTTP
-]
+PORTS = {
+    # --- real-world common ports (Shodan-realistic) ---
+    80: "http",
+    443: "https",
+    22: "ssh",
+    21: "ftp",
+
+    # --- MTD lab ports (so attacks keep tracking mutations) ---
+    8080: "http-alt",
+    8081: "http-alt",
+    8082: "http-alt",
+    8083: "http-alt",
+    8084: "http-alt",
+
+    3001: "api",
+    3002: "api",
+    3003: "api",
+
+    5400: "database",
+    5401: "database",
+    5402: "database",
+
+    2200: "ssh",
+    2201: "ssh",
+    2202: "ssh",
+
+    2100: "ftp",
+    2101: "ftp",
+    2102: "ftp",
+}
+
 
 # --------------------------------------------------
 # Query Shodan using COUNT (no host data)
 # --------------------------------------------------
 
-port_distribution = []
+raw_stats = {}
 
-for port in ports:
+for port, service in PORTS.items():
     query = f"port:{port}"
     print(f"[+] Counting Shodan results for {query}")
 
@@ -54,15 +78,18 @@ for port in ports:
         print(f"[!] Shodan API error for {query}: {e}")
         total = 0
 
-    port_distribution.append([port, total])
+    raw_stats[str(port)] = {
+        "count": int(total),
+        "service": service
+    }
 
 # --------------------------------------------------
-# Save distribution to JSON
+# Save RAW stats to JSON (new format)
 # --------------------------------------------------
 
-output_path = Path(__file__).parent / "port_distribution.json"
+output_path = Path(__file__).parent / "raw_port_stats.json"
 
 with open(output_path, "w") as f:
-    json.dump(port_distribution, f, indent=2)
+    json.dump(raw_stats, f, indent=2)
 
-print(f"[✓] Saved port distribution to {output_path}")
+print(f"[✓] Saved raw Shodan port stats to {output_path}")

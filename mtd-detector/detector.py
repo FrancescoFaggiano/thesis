@@ -161,9 +161,32 @@ def remove_redirect_rule(old_port: int, new_port: int, service_name: str):
 
 PROTECTED_PORTS = {3000, 9090, 9100, 9101, 9102, 443, 50000}
 
+# Ports that are part of the MTD "maneuver space" must NOT be permanently dropped,
+# otherwise the mutator may later select a port that was previously DROP'd.
+PORT_RANGES = {
+    "web": [8080, 8081, 8082, 8083, 8084],
+    "api": [3001, 3002, 3003],
+    "database": [5400, 5401, 5402],
+    "ssh": [2200, 2201, 2202],
+    "ftp": [2100, 2101, 2102],
+}
+
+RESERVED_MTD_PORTS = set()
+for _ports in PORT_RANGES.values():
+    RESERVED_MTD_PORTS.update(int(p) for p in _ports)
+
+def is_reserved_mtd_port(port: int) -> bool:
+    return int(port) in RESERVED_MTD_PORTS
+
 def drop_port(port: int):
+    port = int(port)
+
     if port in PROTECTED_PORTS:
         log_event(f"SKIPPED drop on protected port {port}")
+        return
+
+    if is_reserved_mtd_port(port):
+        log_event(f"SKIPPED drop on RESERVED MTD port {port}")
         return
 
     cmd = [IPTABLES_CMD, "-A", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
