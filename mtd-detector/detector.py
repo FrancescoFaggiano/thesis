@@ -85,7 +85,7 @@ active_attackers_gauge = Gauge(
 
 # ---------------- RUNTIME STATE ----------------
 
-conn_events = defaultdict(deque)      # src_ip -> deque[timestamps]
+conn_events = defaultdict(deque)      # src_ip -> deque[(timestamp, service_id_or_None)]
 recent_triggers = {}                  # src_ip -> last_trigger_time
 known_ports = {}                      # service_id -> last_known_port
 
@@ -205,7 +205,6 @@ def drop_port(port: int):
 # ---------------- NFQUEUE CALLBACK ----------------
 
 def nfq_callback(nfpacket):
-    print("[NFQUEUE] packets received")
     try:
         pkt = IP(nfpacket.get_payload())
     except Exception:
@@ -219,44 +218,81 @@ def nfq_callback(nfpacket):
     ip = pkt[IP]
     tcp = pkt[TCP]
 
+    # Only consider initial SYNs (new connection attempts)
     if (tcp.flags & 0x02) and not (tcp.flags & 0x10):  # SYN and not ACK
         src = ip.src
         dst_port = int(tcp.dport)
 
         now = datetime.now(timezone.utc)
+
+        # Determine whether this SYN hits a current service port
+        svc_now = find_service_by_port(dst_port)
+        svc_id_now = svc_now["id"] if svc_now else None
+
+        # Store (timestamp, service_id_or_None) in the per-source window
         dq = conn_events[src]
-        dq.append(now)
+        dq.append((now, svc_id_now))
+
+        # Evict old entries outside the sliding window
         cutoff = now - timedelta(seconds=SLIDING_WINDOW_SECONDS)
-        while dq and dq[0] < cutoff:
+        while dq and dq[0][0] < cutoff:
             dq.popleft()
 
         connections_total.labels(src_ip=src, dst_port=str(dst_port)).inc()
         log_event(f"NEW_CONN src={src} dport={dst_port}")
 
-        # Check threshold
+        # Check scan threshold
         if len(dq) >= CONN_THRESHOLD:
             last = recent_triggers.get(src)
             if last and (now - last).total_seconds() < TRIGGER_COOLDOWN_SECONDS:
                 nfpacket.accept()
                 return
 
-            svc = find_service_by_port(dst_port)
-            if svc:
+            # Option B: if threshold exceeded, trigger mutation on a service hit in the window,
+            # even if the threshold-crossing packet was not to a service port.
+            target_service_id = None
+            target_service_name = None
+
+            if svc_now:
+                # Current packet hit a service: trigger as before
+                target_service_id = svc_now["id"]
+                target_service_name = svc_now.get("name")
+            else:
+                # Current packet didn't hit a service: look for most recent service hit in window
+                for _ts, sid in reversed(dq):
+                    if sid is not None:
+                        target_service_id = sid
+                        break
+
+                # Resolve service name for logging (optional)
+                if target_service_id is not None:
+                    state = read_state()
+                    for s in state.get("services", []):
+                        if str(s.get("id")) == str(target_service_id):
+                            target_service_name = s.get("name")
+                            break
+
+            if target_service_id is not None:
                 # Write trigger for mutator
                 trig = {
                     "time": now.isoformat(),
                     "src_ip": src,
-                    "dst_port": dst_port,
-                    "service_id": svc["id"]
+                    "dst_port": dst_port,       # observed destination port of this packet
+                    "service_id": target_service_id
                 }
                 trig_file = TRIG_DIR / f"scan_{int(now.timestamp())}_{src.replace('.', '_')}_{dst_port}.json"
                 with open(trig_file, "w") as f:
                     json.dump(trig, f)
+
                 scans_total.labels(src_ip=src, dst_port=str(dst_port)).inc()
-                log_event(f"SCAN_TRIGGER src={src} dport={dst_port} service={svc['name']}")
+                if target_service_name:
+                    log_event(f"SCAN_TRIGGER src={src} dport={dst_port} service={target_service_name} (OptionB)")
+                else:
+                    log_event(f"SCAN_TRIGGER src={src} dport={dst_port} service_id={target_service_id} (OptionB)")
             else:
-                # Unused port: close it with DROP rule
+                # No service hit in the window => treat as scan of unused ports (original behavior)
                 drop_port(dst_port)
+
             recent_triggers[src] = now
 
     nfpacket.accept()
