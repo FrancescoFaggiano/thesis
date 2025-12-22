@@ -63,23 +63,38 @@ services:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     restart: unless-stopped
 
-  synthetic_attacker:
-    build: shodan/attacker
+  legitimate:
+    build: ./traffic
+    container_name: legit-traffic
+    command: python traffic/legitimate/legit_pool.py
+    network_mode: "host"
+    volumes:
+      - ./shared:/app/shared
+    depends_on:
+      - controller
+    restart: unless-stopped
+
+  scanner:
+    build: ./traffic
+    container_name: scanner-pool
+    command: python traffic/scanner/scanner_pool.py
+    network_mode: "host"
+    privileged: true
+    volumes:
+      - ./traffic/data/scanner_ports.json:/data/scanner_ports.json:ro
     depends_on:
       - detector
-    network_mode: host
-    volumes:
-      - ./shodan:/data
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana_mtd
-    network_mode: "host"
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     restart: unless-stopped
+
+  malware:
+    build: ./traffic
+    container_name: malware-pool
+    command: python traffic/malware/malware_pool.py
+    network_mode: "host"
+    privileged: true
+    volumes:
+      - ./traffic/data/malware_ports.json:/data/malware_ports.json:ro
+    depends_on:
+      - detector
+    restart: unless-stopped
+    
