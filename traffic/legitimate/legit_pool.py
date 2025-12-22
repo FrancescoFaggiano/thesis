@@ -2,9 +2,10 @@
 import json, time, random
 import http.client
 from pathlib import Path
+import os
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-STATE_FILE = REPO_ROOT / "shared" / "state.json"
+STATE_FILE = Path(os.environ.get("STATE_FILE", "/app/shared/state.json"))
+
 
 TARGET_HOST = "localhost"
 SERVICE_ID = "svc-web"
@@ -102,4 +103,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
