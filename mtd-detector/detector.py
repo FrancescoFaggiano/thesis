@@ -189,8 +189,16 @@ def drop_port(port: int):
         log_event(f"SKIPPED drop on RESERVED MTD port {port}")
         return
 
-    cmd = [IPTABLES_CMD, "-A", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # B1: avoid duplicates by checking if rule already exists before appending it.
+    check_cmd = [IPTABLES_CMD, "-C", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
+    add_cmd   = [IPTABLES_CMD, "-A", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
+
+    rc = subprocess.run(check_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+    if rc == 0:
+        log_event(f"DROP rule already present for port {port} (skipping duplicate)")
+        return
+
+    subprocess.run(add_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     drops_total.labels(dst_port=str(port)).inc()
     log_event(f"DROP rule added for unused/scanned port {port}")
 
