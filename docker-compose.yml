@@ -97,4 +97,4 @@ services:
     depends_on:
       - detector
     restart: unless-stopped
-    
+  
