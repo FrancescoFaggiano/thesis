@@ -189,8 +189,30 @@ def drop_port(port: int):
         log_event(f"SKIPPED drop on RESERVED MTD port {port}")
         return
 
-    cmd = [IPTABLES_CMD, "-A", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # ---avoid duplicates by checking existence before appending ---
+    check_cmd = [
+        IPTABLES_CMD, "-C", "INPUT",
+        "-p", "tcp", "--dport", str(port),
+        "-j", "DROP"
+    ]
+    add_cmd = [
+        IPTABLES_CMD, "-A", "INPUT",
+        "-p", "tcp", "--dport", str(port),
+        "-j", "DROP"
+    ]
+
+    exists = (subprocess.run(
+        check_cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    ).returncode == 0)
+
+    if exists:
+        log_event(f"DROP rule already present for port {port} (skipping duplicate)")
+        return
+    # ---------------------------------------------------------------------
+
+    subprocess.run(add_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     drops_total.labels(dst_port=str(port)).inc()
     log_event(f"DROP rule added for unused/scanned port {port}")
 
@@ -327,24 +349,3 @@ if __name__ == "__main__":
     # Start state watcher in background
     import threading
     t = threading.Thread(target=watch_state_for_redirects, daemon=True)
-    t.start()
-
-    nfq = NetfilterQueue()
-
-    print("[DEBUG] About to bind NFQUEUE")
-    nfq.bind(QUEUE_NUM, nfq_callback)
-    print("[DEBUG] NFQUEUE bound successfully")
-
-    log_event(f"NFQUEUE bound on queue {QUEUE_NUM}, listening for TCP SYNs")
-
-    try:
-        print("[DEBUG] Calling nfqueue.run()")
-        nfq.run()
-    except KeyboardInterrupt:
-        log_event("Interrupted by user")
-    finally:
-        try:
-            nfq.unbind()
-        except Exception:
-            pass
-        log_event("Detector exiting")
