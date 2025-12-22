@@ -16,7 +16,7 @@ services:
       - QUEUE_NUM=1
       - SLIDING_WINDOW_SECONDS=10
       - CONN_THRESHOLD=8
-      - TRIGGER_COOLDOWN_SECONDS=30
+      - TRIGGER_COOLDOWN_SECONDS=5
       - REDIRECT_GRACE_SECONDS=30
 
     restart: unless-stopped
