@@ -49,6 +49,9 @@ TRIGGER_COOLDOWN_SECONDS = int(os.environ.get("TRIGGER_COOLDOWN_SECONDS", "30"))
 
 IPTABLES_CMD = shutil.which("iptables") or "/sbin/iptables"
 
+REDIRECT_GRACE_SECONDS = int(os.environ.get("REDIRECT_GRACE_SECONDS", "30"))
+
+
 # ---------------- PROMETHEUS METRICS ----------------
 
 connections_total = Counter(
@@ -82,10 +85,11 @@ active_attackers_gauge = Gauge(
 
 # ---------------- RUNTIME STATE ----------------
 
-conn_events = defaultdict(deque)      # src_ip -> deque[timestamps]
+conn_events = defaultdict(deque)      # src_ip -> deque[(timestamp, service_id_or_None)]
 recent_triggers = {}                  # src_ip -> last_trigger_time
 known_ports = {}                      # service_id -> last_known_port
 
+active_redirects = []
 # ---------------- UTILITIES ----------------
 
 def log_event(msg: str):
@@ -146,22 +150,61 @@ def add_redirect_rule(old_port: int, new_port: int, service_name: str):
     redirects_total.labels(service_name=service_name).inc()
     log_event(f"REDIRECT old_port={old_port} -> new_port={new_port} for {service_name}")
 
-PROTECTED_PORTS = {22, 80, 3000, 9090, 9100, 9101, 9102, 443}
+def remove_redirect_rule(old_port: int, new_port: int, service_name: str):
+    cmd = [
+        IPTABLES_CMD, "-t", "nat", "-D", "MTD_REDIRECT",
+        "-p", "tcp", "--dport", str(old_port),
+        "-j", "REDIRECT", "--to-ports", str(new_port)
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log_event(f"REDIRECT EXPIRED old_port={old_port} -> new_port={new_port} for {service_name}")
+
+PROTECTED_PORTS = {3000, 9090, 9100, 9101, 9102, 443, 50000}
+
+# Ports that are part of the MTD "maneuver space" must NOT be permanently dropped,
+# otherwise the mutator may later select a port that was previously DROP'd.
+PORT_RANGES = {
+    "web": [8080, 8081, 8082, 8083, 8084],
+    "api": [3001, 3002, 3003],
+    "database": [5400, 5401, 5402],
+    "ssh": [2200, 2201, 2202],
+    "ftp": [2100, 2101, 2102],
+}
+
+RESERVED_MTD_PORTS = set()
+for _ports in PORT_RANGES.values():
+    RESERVED_MTD_PORTS.update(int(p) for p in _ports)
+
+def is_reserved_mtd_port(port: int) -> bool:
+    return int(port) in RESERVED_MTD_PORTS
 
 def drop_port(port: int):
+    port = int(port)
+
     if port in PROTECTED_PORTS:
         log_event(f"SKIPPED drop on protected port {port}")
         return
 
-    cmd = [IPTABLES_CMD, "-A", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if is_reserved_mtd_port(port):
+        log_event(f"SKIPPED drop on RESERVED MTD port {port}")
+        return
+
+    # B1: avoid duplicates by checking if rule already exists before appending it.
+    check_cmd = [IPTABLES_CMD, "-C", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
+    add_cmd   = [IPTABLES_CMD, "-A", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
+
+    rc = subprocess.run(check_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+    if rc == 0:
+        log_event(f"DROP rule already present for port {port} (skipping duplicate)")
+        return
+
+    subprocess.run(add_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     drops_total.labels(dst_port=str(port)).inc()
     log_event(f"DROP rule added for unused/scanned port {port}")
 
 # ---------------- NFQUEUE CALLBACK ----------------
 
 def nfq_callback(nfpacket):
-    print("[NFQUEUE] packets received")
     try:
         pkt = IP(nfpacket.get_payload())
     except Exception:
@@ -175,44 +218,81 @@ def nfq_callback(nfpacket):
     ip = pkt[IP]
     tcp = pkt[TCP]
 
+    # Only consider initial SYNs (new connection attempts)
     if (tcp.flags & 0x02) and not (tcp.flags & 0x10):  # SYN and not ACK
         src = ip.src
         dst_port = int(tcp.dport)
 
         now = datetime.now(timezone.utc)
+
+        # Determine whether this SYN hits a current service port
+        svc_now = find_service_by_port(dst_port)
+        svc_id_now = svc_now["id"] if svc_now else None
+
+        # Store (timestamp, service_id_or_None) in the per-source window
         dq = conn_events[src]
-        dq.append(now)
+        dq.append((now, svc_id_now))
+
+        # Evict old entries outside the sliding window
         cutoff = now - timedelta(seconds=SLIDING_WINDOW_SECONDS)
-        while dq and dq[0] < cutoff:
+        while dq and dq[0][0] < cutoff:
             dq.popleft()
 
         connections_total.labels(src_ip=src, dst_port=str(dst_port)).inc()
         log_event(f"NEW_CONN src={src} dport={dst_port}")
 
-        # Check threshold
+        # Check scan threshold
         if len(dq) >= CONN_THRESHOLD:
             last = recent_triggers.get(src)
             if last and (now - last).total_seconds() < TRIGGER_COOLDOWN_SECONDS:
                 nfpacket.accept()
                 return
 
-            svc = find_service_by_port(dst_port)
-            if svc:
+            # Option B: if threshold exceeded, trigger mutation on a service hit in the window,
+            # even if the threshold-crossing packet was not to a service port.
+            target_service_id = None
+            target_service_name = None
+
+            if svc_now:
+                # Current packet hit a service: trigger as before
+                target_service_id = svc_now["id"]
+                target_service_name = svc_now.get("name")
+            else:
+                # Current packet didn't hit a service: look for most recent service hit in window
+                for _ts, sid in reversed(dq):
+                    if sid is not None:
+                        target_service_id = sid
+                        break
+
+                # Resolve service name for logging (optional)
+                if target_service_id is not None:
+                    state = read_state()
+                    for s in state.get("services", []):
+                        if str(s.get("id")) == str(target_service_id):
+                            target_service_name = s.get("name")
+                            break
+
+            if target_service_id is not None:
                 # Write trigger for mutator
                 trig = {
                     "time": now.isoformat(),
                     "src_ip": src,
-                    "dst_port": dst_port,
-                    "service_id": svc["id"]
+                    "dst_port": dst_port,       # observed destination port of this packet
+                    "service_id": target_service_id
                 }
                 trig_file = TRIG_DIR / f"scan_{int(now.timestamp())}_{src.replace('.', '_')}_{dst_port}.json"
                 with open(trig_file, "w") as f:
                     json.dump(trig, f)
+
                 scans_total.labels(src_ip=src, dst_port=str(dst_port)).inc()
-                log_event(f"SCAN_TRIGGER src={src} dport={dst_port} service={svc['name']}")
+                if target_service_name:
+                    log_event(f"SCAN_TRIGGER src={src} dport={dst_port} service={target_service_name} (OptionB)")
+                else:
+                    log_event(f"SCAN_TRIGGER src={src} dport={dst_port} service_id={target_service_id} (OptionB)")
             else:
-                # Unused port: close it with DROP rule
+                # No service hit in the window => treat as scan of unused ports (original behavior)
                 drop_port(dst_port)
+
             recent_triggers[src] = now
 
     nfpacket.accept()
@@ -226,10 +306,21 @@ def watch_state_for_redirects():
       - install iptables REDIRECT old->new
       - log event + metrics
     """
-    global known_ports
+    global known_ports, active_redirects
     last_mtime = STATE_FILE.stat().st_mtime if STATE_FILE.exists() else 0.0
 
     while True:
+        # Always cleanup expired redirects (once per loop)
+        now = time.time()
+        if active_redirects:
+            still_active = []
+            for r in active_redirects:
+                if now >= r["expires_at"]:
+                    remove_redirect_rule(r["old"], r["new"], r["service"])
+                else:
+                    still_active.append(r)
+            active_redirects[:] = still_active
+
         try:
             if STATE_FILE.exists():
                 mtime = STATE_FILE.stat().st_mtime
@@ -243,10 +334,24 @@ def watch_state_for_redirects():
                         old_port = known_ports.get(sid)
                         if old_port is None:
                             known_ports[sid] = new_port
-                        elif old_port != new_port:
+                            continue
+                        if old_port != new_port:
+                            if REDIRECT_GRACE_SECONDS > 0:
                             # Port changed: add redirect
-                            add_redirect_rule(old_port, new_port, name)
+                                add_redirect_rule(old_port, new_port, name)
+                                active_redirects.append({
+                                    "old": old_port,
+                                    "new": new_port,
+                                    "service": name,
+                                    "expires_at": now + REDIRECT_GRACE_SECONDS
+                                })
+                            else:
+                                log_event(
+                                    f"NO REDIRECT (grace=0) {name}: {old_port} -> {new_port}"
+                                )
+
                             known_ports[sid] = new_port
+
         except Exception as e:
             log_event(f"ERROR in watch_state_for_redirects: {e}")
         time.sleep(1.0)
