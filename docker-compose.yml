@@ -12,6 +12,7 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
+      - SSH_PORT=50000
       - METRICS_PORT=9101
       - QUEUE_NUM=1
       - SLIDING_WINDOW_SECONDS=10

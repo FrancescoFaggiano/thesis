@@ -128,6 +128,15 @@ def setup_iptables():
     subprocess.run([IPTABLES_CMD, "-t", "nat", "-I", "PREROUTING", "1",
                     "-j", "MTD_REDIRECT"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    SSH_PORT = int(os.environ.get("SSH_PORT", "50000"))
+    check_ssh = [IPTABLES_CMD, "-C", "INPUT", "-p", "tcp", "--dport", str(SSH_PORT), "-j", "ACCEPT"]
+    insert_ssh = [IPTABLES_CMD, "-I", "INPUT", "1", "-p", "tcp", "--dport", str(SSH_PORT), "-j", "ACCEPT"]
+    if subprocess.run(check_ssh, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        subprocess.run(insert_ssh, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log_event(f"SSH bypass ACCEPT installed for tcp/{SSH_PORT} (pre-NFQUEUE)")
+    else:
+        log_event(f"SSH bypass ACCEPT already present for tcp/{SSH_PORT}")
 
     # NFQUEUE rule on INPUT + OUTPUT for NEW TCP
     for chain in ("INPUT", "OUTPUT"):
