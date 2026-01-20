@@ -12,11 +12,13 @@ services:
     volumes:
       - ./shared:/app/shared
     environment:
+      - SSH_PORT=50000
       - METRICS_PORT=9101
       - QUEUE_NUM=1
       - SLIDING_WINDOW_SECONDS=10
       - CONN_THRESHOLD=8
-      - TRIGGER_COOLDOWN_SECONDS=30
+      - TRIGGER_COOLDOWN_SECONDS=5
+      - REDIRECT_GRACE_SECONDS=30
     restart: unless-stopped
 
   mutator:
@@ -59,25 +61,4 @@ services:
     network_mode: "host"
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    restart: unless-stopped
-
-  synthetic_attacker:
-    build: shodan/attacker
-    depends_on:
-      - detection
-    network_mode: host
-    volumes:
-      - ./shodan:/data
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana_mtd
-    network_mode: "host"
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     restart: unless-stopped
