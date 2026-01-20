@@ -1,30 +1,95 @@
 import shodan
-from collections import Counter
 import json
 import os
+from dotenv import load_dotenv
+from pathlib import Path
+
+# --------------------------------------------------
+# Load API key from shodan/.env
+# --------------------------------------------------
+
+env_path = Path(__file__).parent / ".env"
+load_dotenv(env_path)
 
 API_KEY = os.getenv("SHODAN_API_KEY")
 
+if not API_KEY:
+    raise RuntimeError(
+        "Missing SHODAN_API_KEY. "
+        "Create shodan/.env with SHODAN_API_KEY=your_key"
+    )
+
+# --------------------------------------------------
+# Initialize Shodan client
+# --------------------------------------------------
+
 api = shodan.Shodan(API_KEY)
 
-ports = Counter()
+# --------------------------------------------------
+# Define ports of interest + service labels
+# --------------------------------------------------
 
-queries = [
-    
-    "port:8080", "port:8081", "port:8082", "port:8083", "port:8084", #web
-    "port:3001", "port:3002", "port:3003", #api
-    "port:5400", "port:5401", "port:5402", #database
-    "port:2200", "port:2201", "port:2202", #ssh
-    "port:2100", "port:2101", "port:2102" #ftp
-]
+PORTS = {
+    # --- real-world common ports (Shodan-realistic) ---
+    80: "http",
+    443: "https",
+    22: "ssh",
+    21: "ftp",
 
-for q in queries:
-    print("[+] Querying:", q)
-    results = api.search(q, limit=1000)
-    for r in results["matches"]:
-        ports[r["port"]] += 1
+    # --- MTD lab ports (so attacks keep tracking mutations) ---
+    8080: "http-alt",
+    8081: "http-alt",
+    8082: "http-alt",
+    8083: "http-alt",
+    8084: "http-alt",
 
-with open("port_distribution.json", "w") as f:
-    json.dump(ports.most_common(), f, indent=2)
+    3001: "api",
+    3002: "api",
+    3003: "api",
 
-print("Saved port_distribution.json")
+    5400: "database",
+    5401: "database",
+    5402: "database",
+
+    2200: "ssh",
+    2201: "ssh",
+    2202: "ssh",
+
+    2100: "ftp",
+    2101: "ftp",
+    2102: "ftp",
+}
+
+
+# --------------------------------------------------
+# Query Shodan using COUNT (no host data)
+# --------------------------------------------------
+
+raw_stats = {}
+
+for port, service in PORTS.items():
+    query = f"port:{port}"
+    print(f"[+] Counting Shodan results for {query}")
+
+    try:
+        result = api.count(query)
+        total = result.get("total", 0)
+    except shodan.APIError as e:
+        print(f"[!] Shodan API error for {query}: {e}")
+        total = 0
+
+    raw_stats[str(port)] = {
+        "count": int(total),
+        "service": service
+    }
+
+# --------------------------------------------------
+# Save RAW stats to JSON (new format)
+# --------------------------------------------------
+
+output_path = Path(__file__).parent / "raw_port_stats.json"
+
+with open(output_path, "w") as f:
+    json.dump(raw_stats, f, indent=2)
+
+print(f"[✓] Saved raw Shodan port stats to {output_path}")
